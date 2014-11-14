@@ -1,0 +1,283 @@
+classdef Scheduler_Minute_Based
+    %% Assumptions:
+    % 1. Time series are 12 hours/ 720 minutes(From 8 am to 8 pm), and time step is 1 minute
+    % 2. renewable energy pattern for each minute is given, as G(t)
+    % 3. Energy/power Demand for each minute is given, as D(t), in the unit of kWh, and for now it is constant at each time step.
+    % 4. There are three ESDs in the hierarchy, from top to bottom are: renewable(G), battery(B), and flywheel(F)
+    % 5. At the beginning of the time series, the energy stored in battery(B) and flywheel(F) are half full, equal to their corresponding max capacities.
+    % 6. The way this ESD hierarchy works is: G can charge B and F, as well as satisfy D; B can charge F, and D; F can only satisfy D.
+    % 7. The self discharge of B(Loss rate of B) can be ignored, whereas that of F cannot.
+    % 8. If, at each time step, G cannot be used fully, it is wasted(cannot be used for later time steps)
+    %
+    %% Variables that can be controlled, for each time step t:
+    % 1. B_g(t): the amount of green energy charged into B, variable 1 to
+    % 720
+    % 2. F_g(t): the amount of green energy charged into F, 721 to 1440
+    % 3. D_g(t): the amount of green energy to satisfy D, 1441 to 2160
+    % 4. F_b(t): the amount of battery energy to charge F, 2161 to 2880
+    % 5. D_b(t): the amount of battery energy to satisfy D, 2881 to 3600
+    % 6. DoD_b(t): the Depth of Discharge of B, 3601 to 4320
+    % 7. D_f(t): the amount of flywheel energy to satisfy D, 4321 to 5040
+    % 8. DoD_f(t): the Depth of Discharge of F, 5041 to 5760
+    % 9. E_b(t): the amount of energy stored in B, 5761 to 6480
+    % 10. E_f(t): the amount of energy stored in F, 6481 to 7200
+    % 11. B_bin(t): mutual exclusive binary variables for battery, 7201 to
+    % 7920
+    % 12. F_bin(t): mutual exclusive binary variables for flywheel, 7921 to
+    % 8640
+    % 13. All these variables have the unit of kWh, except #6 and #8, which are percentages, and 11, 12 are binary numbers.
+    %
+    %% Objective function:
+    % The objective for now is to:
+    % 1. maximize the expected life time of the battery: Period_Of_Peak_Power * Life_Cycle * (DoD_max_b / DoD_b), in the unit of year
+    % The period of peak power is assumed to be 1 minute, the life cycle of the battery is 2 ( 2000 numbers of discharge), DoD_max is 0.8
+    % 2. minimize the discharge of battery
+    % 3. maximize the battery storage at each time step. 
+    % These three objective functions can be represetned using different
+    % weights. 
+    %
+    %% Constraints:
+    % 1. D_b(t) + F_b(t) <= r_b * (Max_Capa_B / 1200),  discharge rate : charge rate of
+    % the battery is r_b
+    % 2. B_g(t) <= Max_Capa_B / 1200,, charge rate of B is bounded, fully
+    % charge in 20 hours or 1200 minutes
+    % 3. E_b(t) <= Max_Capa_B
+    % 4. E_f(t) <= Max_Capa_F
+    % 5. (1 - DoD_b(t)) * Max_Capa_B <= E_b(t)
+    % 6. (1 - DoD_f(t)) * Max_capa_F <= E_f(t)
+    % 7. Given (F_b(t) +D_b(t) > 0), B_g(t) = 0:  battery cannot be charged and discharged at the same time
+    % 8. Given D_f(t) > 0, F_b(t) + F_g(t) = 0: flywheel cannot be charged and discharged at the same time
+    % 9. F_g(t) + D_g(t) + B_g(t) <= G(t)
+    % 10. DoD_b(t) <= DoD_max_b
+    % 11. DoD_f(t) <= DoD_max_f
+
+    % 12. D_g(t) + D_b(t) + D_f(t) = D(t)
+    % 13. E_b(t) = E_b(t-1) + efficiency_b * B_g(t-1) - (F_b(t-1) + D_b(t-1)),  the energy stored in B for each time step
+    % 14. E_f(t) = E_f(t-1) + efficiency_f * ( F_g(t-1) + F_b(t-1)) - D_f(t-1) - self_discharge_rate_f * E_f(t-1)
+    % 15. D_b(t) + F_b(t) <= E_b(t), battery cannot discharge more than it
+    % current has
+    % 16. D_f(t) <= E_f(t), flywheel cannot discharge more than it
+    % currenlty holds
+    % 17. DoD_b(t) - D_b(t) - F_b(t) = 0, DoD_b(t) is equal to the actual
+    % discharge of the battery
+    % 18. DoD_f(t) - D_f(t) = 0, DoD_f(t) is equal to the actual discharge
+    % of the flywheel
+    % 19. All variables are greater than 0
+    
+    properties
+        renewable
+        battery
+        flywheel
+        demand
+        x                % manipulated variables
+        intcon           % vector of integer constraints
+        A                % A*x <= b
+        b
+        A_eq             % A_eq * x = b_eq
+        b_eq
+        lb               % lb <= x <= ub
+        ub
+        f                % objective function f: min(f' * x)
+    end
+    
+    methods
+        function self = Scheduler_Minute_Based(renewable, battery, flywheel, demand)
+            num_of_inequality = 12 * 720;
+            num_of_equality = 3 * 720;
+            
+           self.renewable = renewable;
+           self.battery = battery;
+           self.flywheel = flywheel;
+           self.demand = demand;
+           self.x = zeros(12 * 720, 1);      % There are 12 types of variables, multiplied by 720 minutes
+           self.A = zeros(num_of_inequality, size(self.x, 1));
+           self.b = zeros(num_of_inequality, 1);
+           self.A_eq = zeros(num_of_equality, size(self.x, 1));
+           self.b_eq = zeros(num_of_equality, 1);
+           self.lb = zeros(size(self.x, 1), 1);
+           self.ub = inf * ones(size(self.x, 1), 1);
+           self.intcon = [];
+           self.f = zeros(size(self.x, 1), 1);
+        end
+        
+        
+        
+        function self = setInequalityConstraints(self)
+            infVal = 10000;
+            
+            % Constraint #1, 1 to 720 total constraints
+            for i = 1 : 720
+                self.A(i, 2161 + i - 1) = 1;
+                self.A(i, 2881 + i - 1) = 1;
+            end
+            self.b(1 : 720, :) = self.battery.charge_discharge_rate * (self.battery.max_capacity / 1200);
+            
+            % Constraint #5, 721 to 1440 total constraints
+            for i = 1 : 720
+                self.A(i + 720, 3601 + i - 1) = -self.battery.max_capacity;
+                self.A(i + 720, 5761 + i - 1) = -1;
+            end
+            self.b(721 : 1440, :) = -self.battery.max_capacity;
+            
+            % Constraint #6, 1441 to 2160 total constraints
+            for i = 1 : 720
+                self.A(i + 1440, 5041 + i - 1) = -self.flywheel.max_capacity;
+                self.A(i + 1440, 6481 + i - 1) = -1;
+            end
+            self.b(1441 : 2160, :) = -self.flywheel.max_capacity;
+            
+            % Constraint #9, 2161 to 2880 total constraints
+            for i = 1 : 720
+                self.A(i + 2160, 1 + i - 1) = 1;
+                self.A(i + 2160, 721 + i - 1) = 1;
+                self.A(i + 2160, 1441 + i - 1) = 1;
+                self.b(i + 2160, :) = self.renewable.distribution(i);
+            end
+            
+            % Constraint #7-1, 2881 to 3600 total constraints, B_g(t) - inf*
+            % B_bin(t) <= 0
+            for i = 1 : 720
+                self.A(i + 2880, 1 + i - 1) = 1;
+                self.A(i + 2880, 7201 + i - 1) = -infVal;
+            end
+            % Constraint #7-2, 3601 to 4320 total constraints, -inf * B_g(t)
+            % + B_bin(t) <= 0
+            for i = 1 : 720
+                self.A(i + 3600, 1 + i - 1) = -infVal;
+                self.A(i + 3600, 7201 + i - 1) = 1;
+            end
+            % Constraint #7-3, 4321 to 5040 total constraints, F_b(t) +
+            % D_b(t) + inf * B_bin(t) <= inf
+            for i = 1 : 720
+                self.A(i + 4320, 2161 + i - 1) = 1;
+                self.A(i + 4320, 2881 + i - 1) = 1;
+                self.A(i + 4320, 7201 + i - 1) = infVal;
+            end
+            self.b(4321 : 5040, :) = infVal;
+            
+            % Constrain #8-1, 5041 to 5760 total constraints, D_f(t) - inf *
+            % F_bin(t) <= 0
+            for i = 1 : 720
+                self.A(i + 5040, 4321 + i - 1) = 1;
+                self.A(i + 5040, 7921 + i - 1) = -infVal;
+            end
+            % Constraint #8-2, 5761 to 6480 total constraints, -inf * D_f(t)
+            % + F_bin(t) <= 0
+            for i = 1 : 720
+                self.A(i + 5760, 4321 + i - 1) = -infVal;
+                self.A(i + 5760, 7921 + i - 1) = 1;
+            end
+            % Constraint #8-3, 6481 to 7200 total constraints, F_b(t) +
+            % F_g(t) + inf * F_bin(t) <= inf
+            for i = 1 : 720
+                self.A(i + 6480, 2161 + i - 1) = 1;
+                self.A(i + 6480, 721 + i - 1) = 1;
+                self.A(i + 6480, 7921 + i - 1) = infVal;
+            end
+            self.b(6481 : 7200, :) = infVal;
+            
+            % Constraint #15, 7201 to 7920 total constraints
+            for i = 1 : 720
+                self.A(i + 7200, 2161 + i - 1) = 1;
+                self.A(i + 7200, 2881 + i - 1) = 1;
+                self.A(i + 7200, 5761 + i - 1) = -1;
+            end
+            
+            % Constraints #16, 7921 to 8640 total constratins
+            for i = 1 : 720
+                self.A(i + 7920, 4321 + i - 1) = 1;
+                self.A(i + 7920, 6481 + i - 1) = -1;
+            end
+           
+        end
+        
+        function self = setEqualityConstraints(self)
+            % Constraint #12, 1 to 720 total constraints
+            for i = 1 : 720
+                self.A_eq(i, 1441 + i - 1) = 1;
+                self.A_eq(i, 2881 + i - 1) = 1;
+                self.A_eq(i, 4321 + i - 1) = 1;
+                self.b_eq(i, :) = self.demand(i);
+            end
+            
+            % Constraint #13, 721 to 1440 total constraints, assume E_b(1) =
+            % 0.5 * max_capacity
+            self.A_eq(721, 5761) = 2;
+            self.b_eq(721, :) = self.battery.max_capacity;
+            for i = 2 : 720
+                self.A_eq(i + 720, 5761 + i - 1) = 1;
+                self.A_eq(i + 720, 5761 + i - 2) = -1;
+                self.A_eq(i + 720, 1 + i - 2) = -self.battery.energy_efficiency;
+                self.A_eq(i + 720, 2161 + i - 2) = 1;
+                self.A_eq(i + 720, 2881 + i - 2) = 1;
+            end
+           
+            % Constraint #14, 1441 to 2160 total constraints, assume E_f(1) =
+            % 0.5 * max_capacity
+            self.A_eq(1441, 6481) = 2;
+            self.b_eq(1441, :) = self.flywheel.max_capacity;
+            for i = 2 : 720
+                self.A_eq(i + 1440, 6481 + i - 1) = 1;
+                self.A_eq(i + 1440, 6481 + i - 2) = -1 + self.flywheel.self_discharge_per_day / 1440;
+                self.A_eq(i + 1440, 721 + i - 2) = -self.flywheel.energy_efficiency;
+                self.A_eq(i + 1440, 2161 + i - 2) = -self.flywheel.energy_efficiency;
+                self.A_eq(i + 1440, 4321 + i - 2) = 1;
+            end
+            
+        end
+        
+        function self = setObjectiveFunction(self)
+%             period_peak_power = 1;  
+%             weight_DoD_B = 0.5;
+            weight_Discharge_B = 1;
+%             weight_Storage_B = 0;
+%             self.f(3601:4320, :) = weight_DoD_B * (1 / (period_peak_power * self.battery.life_cycle * self.battery.depth_of_discharge));   % DoD_b from 121 to 144
+                                                                     % Minimize
+                                                                     % the
+                                                                     % inverse
+                                                                     % of Lief cycle of battery: sum(DoD_b) * [1/(Period_Of_Peak_Power * Life_Cycle * DoD_max_b)]
+            self.f(2161:3600, :) = weight_Discharge_B;
+%             self.f(5761:6480,:) = -10;
+            
+            %debug
+%             self.f(1:2160, :) = 10;
+%             self.f(4321:5040, :) = -10;
+        end
+        
+        function self = setBounds(self)
+            self.ub(1:720, :) = self.battery.max_capacity / 1200;   % constraint #2
+            self.ub(5761:6480, :) = self.battery.max_capacity;     % constraint #3
+            self.ub(6481:7200, :) = self.flywheel.max_capacity;     % constraint #4
+            self.ub(3601:4320, :) = self.battery.depth_of_discharge;  % constraint #10
+            self.ub(5041:5760, :) = self.flywheel.depth_of_discharge;  % constraint #11
+            self.ub(7201:7920, :) = 1;     % B_bin(t) is either 0 or 1
+            self.ub(7921:8640, :) = 1;    % F_bin(t) is either 0 or 1
+            self.ub(3601:4320, :) = 1;    % DoD <= 1
+            self.ub(5041:5760, :) = 1;    % DoD <= 1
+            
+            self.lb(3601:4320, :) = 0.0001;  % DoD >= 0.1, in case of inf and NaN
+            self.lb(5041:5760, :) = 0.0001; 
+            
+            %debug
+%             self.lb(5761:6480, :) = 10;
+        end
+        
+        function self = setIntConstraints(self)
+            self.intcon = 7201 : 8640;    % B_bin and F_bin are integers
+        end
+        
+        function self = getOptimalSolution(self)
+            self = self.setIntConstraints();
+            self = self.setBounds();
+            self = self.setEqualityConstraints();
+            self = self.setInequalityConstraints();
+            self = self.setObjectiveFunction();
+            [self.x,fval] = intlinprog(self.f, self.intcon, self.A, self.b, self.A_eq, self.b_eq, self.lb, self.ub);
+            battery_dod_actual = (self.x(2161 : 2880) + self.x(2881 : 3600)) / self.battery.max_capacity;
+            
+        end
+        
+    end
+    
+end
+
