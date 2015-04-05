@@ -34,7 +34,8 @@ classdef Scheduler_Linprog_NoFlywheel
     % 11 * numOfIntervals
     % 12. F_bin(t): mutual exclusive binary variables for flywheel, 11 * numOfIntervals + 1 to
     % 12 * numOfIntervals
-    % 13. All these variables have the unit of kWh, except #6 and #8, which are percentages, and 11, 12 are binary numbers.
+    % 13 Grid(t), use grid meter  12 * numOfIntervals + 1 to 13 * numOfIntervals
+    % 14. All these variables have the unit of kWh, except #6 and #8, which are percentages, and 11, 12 are binary numbers.
     %
     %% Objective function:
     % The objective for now is to:
@@ -107,7 +108,7 @@ classdef Scheduler_Linprog_NoFlywheel
            self.battery = battery;
            self.flywheel = flywheel;
            self.demand = demand;
-           self.x = zeros(12 * numOfIntervals, 1);      % There are 12 types of variables, multiplied by numOfIntervals minutes
+           self.x = zeros(13 * numOfIntervals, 1);      % There are 13 types of variables, multiplied by numOfIntervals minutes
            self.A = zeros(num_of_inequality, size(self.x, 1));
            self.b = zeros(num_of_inequality, 1);
            self.A_eq = zeros(num_of_equality, size(self.x, 1));
@@ -218,6 +219,7 @@ classdef Scheduler_Linprog_NoFlywheel
                 self.A_eq(i, 2 * self.numOfIntervals + 1 + i - 1) = 1;
                 self.A_eq(i, 4 * self.numOfIntervals + 1 + i - 1) = 1;
                 self.A_eq(i, 6 * self.numOfIntervals + 1 + i - 1) = 1;
+                self.A_eq(i, 12 * self.numOfIntervals + 1 + i - 1) = 1;
                 self.b_eq(i, :) = self.demand(i);
             end
             
@@ -254,6 +256,7 @@ classdef Scheduler_Linprog_NoFlywheel
             weight_Discharge_B = 1;
              weight_Storage_B = -1;
              weight_Green_charge_battery = -1;
+             grid_charge = 20;
 %             self.f(5 * self.numOfIntervals + 1 : 6 * self.numOfIntervals, :) = weight_DoD_B * (1 / (period_peak_power * self.battery.life_cycle * self.battery.depth_of_discharge));   % DoD_b from 121 to 144
                                                                      % Minimize
                                                                      % the
@@ -262,6 +265,7 @@ classdef Scheduler_Linprog_NoFlywheel
             self.f(3 * self.numOfIntervals + 1 : 5 * self.numOfIntervals, :) = weight_Discharge_B;
             self.f(8 * self.numOfIntervals + 1 : 9 * self.numOfIntervals, :) = weight_Storage_B;
             self.f(1 : self.numOfIntervals, :) = weight_Green_charge_battery;
+            self.f(12 * self.numOfIntervals + 1 : 13 * self.numOfIntervals, :) = grid_charge;
             %debug
 %             self.f(1:2160, :) = 10;
 %             self.f(4321:5040, :) = -10;
@@ -309,7 +313,7 @@ classdef Scheduler_Linprog_NoFlywheel
                 if battery_discharge_time(i-1) == 1 && battery_discharge_time(i) == 0
                     if battery_discharge_time(i-2) ~= 0
                         j = i;
-                        while(green_charge_battery(j) == 0)
+                        while j < size(battery_discharge_time, 1) && green_charge_battery(j) == 0
                              j = j + 1;
                         end
                         i = j + 1;

@@ -34,7 +34,8 @@ classdef Scheduler_Linprog
     % 11 * numOfIntervals
     % 12. F_bin(t): mutual exclusive binary variables for flywheel, 11 * numOfIntervals + 1 to
     % 12 * numOfIntervals
-    % 13. All these variables have the unit of kWh, except #6 and #8, which are percentages, and 11, 12 are binary numbers.
+    % 13 Grid(t), use grid meter  12 * numOfIntervals + 1 to 13 * numOfIntervals
+    % 14. All these variables have the unit of kWh, except #6 and #8, which are percentages, and 11, 12 are binary numbers.
     %
     %% Objective function:
     % The objective for now is to:
@@ -66,7 +67,7 @@ classdef Scheduler_Linprog
     % 10. DoD_b(t) <= DoD_max_b
     % 11. DoD_f(t) <= DoD_max_f
 
-    % 12. D_g(t) + D_b(t) + D_f(t) = D(t)
+    % 12. D_g(t) + D_b(t) + D_f(t) + Grid(t) = D(t)
     % 13. E_b(t) = E_b(t-1) + efficiency_b * B_g(t-1) - (F_b(t-1) + D_b(t-1)),  the energy stored in B for each time step
     % 14. E_f(t) = E_f(t-1) + efficiency_f * ( F_g(t-1) + F_b(t-1)) - D_f(t-1) - self_discharge_rate_f * E_f(t-1)
     % 15. D_b(t) + F_b(t) <= E_b(t), battery cannot discharge more than it
@@ -107,7 +108,7 @@ classdef Scheduler_Linprog
            self.battery = battery;
            self.flywheel = flywheel;
            self.demand = demand;
-           self.x = zeros(12 * numOfIntervals, 1);      % There are 12 types of variables, multiplied by numOfIntervals minutes
+           self.x = zeros(13 * numOfIntervals, 1);      % There are 13 types of variables, multiplied by numOfIntervals minutes
            self.A = zeros(num_of_inequality, size(self.x, 1));
            self.b = zeros(num_of_inequality, 1);
            self.A_eq = zeros(num_of_equality, size(self.x, 1));
@@ -222,6 +223,7 @@ classdef Scheduler_Linprog
                 self.A_eq(i, 2 * self.numOfIntervals + 1 + i - 1) = 1;
                 self.A_eq(i, 4 * self.numOfIntervals + 1 + i - 1) = 1;
                 self.A_eq(i, 6 * self.numOfIntervals + 1 + i - 1) = 1;
+                self.A_eq(i, 12 * self.numOfIntervals + 1 + i - 1) = 1;
                 self.b_eq(i, :) = self.demand(i);
             end
             
@@ -256,6 +258,7 @@ classdef Scheduler_Linprog
 %             weight_DoD_B = 0.5;
              weight_Discharge_B = 1;
             weight_Storage_B = -1;
+            grid_charge = 20;
 %             self.f(5 * self.numOfIntervals + 1 : 6 * self.numOfIntervals, :) = weight_DoD_B * (1 / (period_peak_power * self.battery.life_cycle * self.battery.depth_of_discharge));   % DoD_b from 121 to 144
                                                                      % Minimize
                                                                      % the
@@ -263,6 +266,8 @@ classdef Scheduler_Linprog
                                                                      % of Lief cycle of battery: sum(DoD_b) * [1/(Period_Of_Peak_Power * Life_Cycle * DoD_max_b)]
             self.f(3 * self.numOfIntervals + 1 : 5 * self.numOfIntervals, :) = weight_Discharge_B;
             self.f(8 * self.numOfIntervals + 1 : 9 * self.numOfIntervals, :) = weight_Storage_B;
+            self.f(12 * self.numOfIntervals + 1 : 13 * self.numOfIntervals, :) = grid_charge;
+            
 %             self.f(5761:6480,:) = -10;
             
             %debug
