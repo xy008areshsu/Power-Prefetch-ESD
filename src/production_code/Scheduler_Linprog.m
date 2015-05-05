@@ -352,7 +352,10 @@ classdef Scheduler_Linprog
             flywheel_discharge = self.x(6 * self.numOfIntervals + 1 : 7 * self.numOfIntervals);
             flywheel_cost_per_day = flywheel_amortized_cost * sum(flywheel_discharge);
             
-            total_cost_per_day = flywheel_cost_per_day + battery_cost_per_day;
+            grid_usage = self.x(12 * self.numOfIntervals + 1 : 13 * self.numOfIntervals);
+            grid_cost = 0.1 * sum(grid_usage);   % grid cost $0.1 / kWh, assuming fixed value here
+            
+            total_cost_per_day = flywheel_cost_per_day + battery_cost_per_day + grid_cost;
             
             self.battery_life = battery_expected_life_days;
             self.battery_amortized_cost = battery_amortized_cost;

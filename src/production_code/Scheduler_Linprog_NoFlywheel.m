@@ -345,8 +345,14 @@ classdef Scheduler_Linprog_NoFlywheel
             battery_expected_life_days = battery_expected_life_cycles / size(spliter, 2);
             battery_amortized_cost = self.battery.energy_cost / battery_expected_life_days ;
             battery_cost_per_day = battery_amortized_cost * sum(battery_discharge);
+           
             
             total_cost_per_day = battery_cost_per_day;
+            
+            grid_usage = self.x(12 * self.numOfIntervals + 1 : 13 * self.numOfIntervals);
+            grid_cost = 0.1 * sum(grid_usage);   % grid cost $0.1 / kWh, assuming fixed value here      
+            total_cost_per_day = total_cost_per_day + grid_cost;
+            
             battery_lifetime_energy = self.battery.max_capacity * battery_expected_life_cycles; 
             
             self.battery_life = battery_expected_life_days;
